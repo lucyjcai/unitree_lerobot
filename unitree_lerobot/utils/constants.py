@@ -487,7 +487,33 @@ UNIARML1_CONFIG = RobotConfig(
     json_action_data_name=["arm.qpos", "gripper.qpos"],
 )
 
+G1_ARMONLY_CONFIG = RobotConfig(
+    motors=[
+        "kLeftShoulderPitch",
+        "kLeftShoulderRoll",
+        "kLeftShoulderYaw",
+        "kLeftElbow",
+        "kLeftWristRoll",
+        "kLeftWristPitch",
+        "kLeftWristYaw",
+        "kRightShoulderPitch",
+        "kRightShoulderRoll",
+        "kRightShoulderYaw",
+        "kRightElbow",
+        "kRightWristRoll",
+        "kRightWristPitch",
+        "kRightWristYaw",
+    ],
+    cameras=[
+        "cam_high",
+    ],
+    camera_to_image_key={"color_0": "cam_high"},
+    json_state_data_name=["left_arm.qpos", "right_arm.qpos"],
+    json_action_data_name=["left_arm.qpos", "right_arm.qpos"],
+)
+
 ROBOT_CONFIGS = {
+    "Unitree_G1_ArmOnly": G1_ARMONLY_CONFIG,
     "Unitree_Z1_Single": Z1_SINGLE_CONFIG,
     "Unitree_Z1_Dual": Z1_CONFIG,
     "Unitree_G1_Dex1": G1_DEX1_CONFIG,
