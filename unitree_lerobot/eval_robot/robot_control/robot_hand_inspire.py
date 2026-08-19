@@ -1,3 +1,4 @@
+import os  # local patch: interface-pinned DDS init
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize  # dds
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_  # idl
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
@@ -38,7 +39,7 @@ class Inspire_Controller:
         if self.simulation_mode:
             ChannelFactoryInitialize(1)
         else:
-            ChannelFactoryInitialize(0)
+            ChannelFactoryInitialize(0, os.getenv("UNITREE_NET_IF", "enx4cea416d5dbb"))
 
         # initialize handcmd publisher and handstate subscriber
         self.HandCmb_publisher = ChannelPublisher(kTopicInspireCommand, MotorCmds_)

@@ -1,3 +1,4 @@
+import os  # local patch: interface-pinned DDS init
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize # dds
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Point32_ # idl
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
@@ -70,7 +71,7 @@ class G1_Mobile_Lift_Controller:
         if self.simulation_mode:
             ChannelFactoryInitialize(1)
         else:
-            ChannelFactoryInitialize(0)
+            ChannelFactoryInitialize(0, os.getenv("UNITREE_NET_IF", "enx4cea416d5dbb"))
         # Height control publisher
         self.HeightCmb_publisher = ChannelPublisher(kTopicHeightCmd, Point32_)
         self.HeightCmb_publisher.Init()
