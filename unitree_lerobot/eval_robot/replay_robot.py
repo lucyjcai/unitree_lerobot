@@ -41,17 +41,24 @@ def replay_main(cfg: EvalRealConfig):
     arm_ctrl, arm_ik, ee_shared_mem, arm_dof, ee_dof = (
         robot_interface[key] for key in ["arm_ctrl", "arm_ik", "ee_shared_mem", "arm_dof", "ee_dof"]
     )
-    tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam = (
-        image_info[key]
-        for key in [
-            "tv_img_array",
-            "wrist_img_array",
-            "tv_img_shape",
-            "wrist_img_shape",
-            "is_binocular",
-            "has_wrist_cam",
-        ]
-    )
+    # local patch: setup_image_client returns (client, config), not the dict of
+    # shared-memory arrays this unpack expects (upstream drift). The arrays are
+    # only needed for --visualization, so default them and unpack only if a
+    # dict was actually provided.
+    tv_img_array = wrist_img_array = tv_img_shape = wrist_img_shape = None
+    is_binocular = has_wrist_cam = False
+    if isinstance(image_info, dict):
+        tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam = (
+            image_info[key]
+            for key in [
+                "tv_img_array",
+                "wrist_img_array",
+                "tv_img_shape",
+                "wrist_img_shape",
+                "is_binocular",
+                "has_wrist_cam",
+            ]
+        )
 
     logger_mp.info(f"Starting evaluation loop at {cfg.frequency} Hz.")
 
@@ -59,7 +66,11 @@ def replay_main(cfg: EvalRealConfig):
     actions = dataset.hf_dataset.select_columns("action")
 
     # init pose
-    from_idx = dataset.meta.episodes["dataset_from_index"][0]
+    # local patch: the episodes=[...] filter can be a no-op when all episodes
+    # share one data file, so slice the requested episode's frame range
+    # explicitly instead of trusting dataset.num_frames.
+    from_idx = dataset.meta.episodes["dataset_from_index"][cfg.episodes]
+    to_idx = dataset.meta.episodes["dataset_to_index"][cfg.episodes]
     step = dataset[from_idx]
     init_left_arm_pose = step["observation.state"][:14].cpu().numpy()
 
@@ -70,7 +81,7 @@ def replay_main(cfg: EvalRealConfig):
         tau = arm_ik.solve_tau(init_left_arm_pose)
         arm_ctrl.ctrl_dual_arm(init_left_arm_pose, tau)
         time.sleep(1)
-        for idx in range(dataset.num_frames):
+        for idx in range(from_idx, to_idx):  # local patch: only the requested episode
             loop_start_time = time.perf_counter()
 
             left_ee_state = right_ee_state = np.array([])
@@ -111,7 +122,8 @@ def replay_main(cfg: EvalRealConfig):
             # Maintain frequency
             time.sleep(max(0, (1.0 / cfg.frequency) - (time.perf_counter() - loop_start_time)))
 
-    cleanup_resources(image_info)
+    if isinstance(image_info, dict):  # local patch: see above
+        cleanup_resources(image_info)
 
 
 if __name__ == "__main__":
