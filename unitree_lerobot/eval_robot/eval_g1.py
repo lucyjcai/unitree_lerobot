@@ -78,17 +78,9 @@ def eval_policy(
         arm_ctrl, arm_ik, ee_shared_mem, arm_dof, ee_dof = (
             robot_interface[key] for key in ["arm_ctrl", "arm_ik", "ee_shared_mem", "arm_dof", "ee_dof"]
         )
-        tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam = (
-            image_info[key]
-            for key in [
-                "tv_img_array",
-                "wrist_img_array",
-                "tv_img_shape",
-                "wrist_img_shape",
-                "is_binocular",
-                "has_wrist_cam",
-            ]
-        )
+        # local patch: setup_image_client returns (client, config); the dict of
+        # shared-memory arrays this expected no longer exists upstream.
+        img_client, camera_config = image_info
 
         # Get initial pose from the first step of the dataset
         from_idx = dataset.meta.episodes["dataset_from_index"][0]
@@ -110,9 +102,8 @@ def eval_policy(
             while True:
                 loop_start_time = time.perf_counter()
                 # 1. Get Observations
-                observation, current_arm_q = process_images_and_observations(
-                    tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam, arm_ctrl
-                )
+                # local patch: current upstream signature
+                observation, current_arm_q = process_images_and_observations(img_client, camera_config, arm_ctrl)
                 left_ee_state = right_ee_state = np.array([])
                 if cfg.ee:
                     with ee_shared_mem["lock"]:
