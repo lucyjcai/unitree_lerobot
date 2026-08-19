@@ -37,7 +37,8 @@ from unitree_lerobot.eval_robot.utils.utils import (
     to_scalar,
     EvalRealConfig,
 )
-from unitree_lerobot.eval_robot.utils.rerun_visualizer import RerunLogger, visualization_data
+# local patch: per-joint actual-vs-predicted overlay panels (dataset eval only)
+from unitree_lerobot.eval_robot.utils.rerun_visualizer_overlay import OverlayRerunLogger as RerunLogger, visualization_data
 
 
 import logging_mp
