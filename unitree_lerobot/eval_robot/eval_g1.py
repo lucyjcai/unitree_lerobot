@@ -104,6 +104,13 @@ def eval_policy(
                 # 1. Get Observations
                 # local patch: current upstream signature
                 observation, current_arm_q = process_images_and_observations(img_client, camera_config, arm_ctrl)
+                # local patch: skip the tick instead of crashing when a camera
+                # frame or arm state is momentarily unavailable (e.g. image
+                # client still warming up); the arm holds its last target.
+                if current_arm_q is None or not any(k.startswith("observation.images.") and v is not None for k, v in observation.items()):
+                    logger_mp.warning("Incomplete observation (no image/arm state); skipping tick.")
+                    time.sleep(1.0 / cfg.frequency)
+                    continue
                 left_ee_state = right_ee_state = np.array([])
                 if cfg.ee:
                     with ee_shared_mem["lock"]:
@@ -153,7 +160,7 @@ def eval_policy(
     except Exception as e:
         logger_mp.info(f"An error occurred: {e}")
     finally:
-        if image_info:
+        if isinstance(image_info, dict):  # local patch: shm dict no longer exists upstream
             cleanup_resources(image_info)
 
 
