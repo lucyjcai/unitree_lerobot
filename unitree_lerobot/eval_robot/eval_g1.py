@@ -117,6 +117,7 @@ def eval_policy(
                 buffer_lock = threading.Lock()
                 stop_event = threading.Event()
                 executed = [0]                              # actions executed by the main loop
+                last_action = [None]                        # last commanded action (for seam fillet)
                 latency_ticks = [max(1, chunk_len // 2)]    # inference cost estimate, refined online
                 device = get_safe_torch_device(policy.config.device)
 
@@ -174,7 +175,20 @@ def eval_policy(
                             if skip >= len(chunk):
                                 logger_mp.warning(f"async: whole chunk stale (skip={skip}); keeping last action")
                                 skip = len(chunk) - 1
-                            action_buffer.extend(chunk[max(0, skip):])
+                            kept = chunk[max(0, skip):]
+                            # seam fillet: consecutive chunks can disagree
+                            # slightly (diffusion re-samples the trajectory),
+                            # which lands as a step at the boundary. Ramp the
+                            # first few actions of the new chunk in from the
+                            # last committed action so the hand-off step stays
+                            # at normal per-tick magnitude.
+                            prev = action_buffer[-1] if action_buffer else last_action[0]
+                            if prev is not None:
+                                blend = min(4, len(kept))
+                                for i in range(blend):
+                                    w = (i + 1) / (blend + 1)
+                                    kept[i] = prev * (1.0 - w) + kept[i] * w
+                            action_buffer.extend(kept)
 
                 worker = threading.Thread(target=sense_and_infer, daemon=True, name="sense_and_infer")
                 worker.start()
@@ -186,6 +200,7 @@ def eval_policy(
                             if action_buffer:
                                 action_np = action_buffer.popleft()
                                 executed[0] += 1
+                                last_action[0] = action_np
                         if action_np is None:
                             # buffer starved (e.g. very first chunk still
                             # computing): hold pose for one tick
