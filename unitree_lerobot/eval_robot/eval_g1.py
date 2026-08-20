@@ -111,42 +111,70 @@ def eval_policy(
                 logger_mp.info(f"Starting ASYNC evaluation loop at {cfg.frequency} Hz.")
                 if cfg.visualization:
                     logger_mp.warning("visualization is not supported in async mode; ignoring.")
+                chunk_len = int(getattr(policy.config, "n_action_steps", 8))
+                dt = 1.0 / cfg.frequency
                 action_buffer = deque()
                 buffer_lock = threading.Lock()
                 stop_event = threading.Event()
-                # keep at most one policy chunk of actions ahead: bounds
-                # observation staleness to ~n_action_steps control ticks
-                buffer_target = int(getattr(policy.config, "n_action_steps", 8))
+                executed = [0]                              # actions executed by the main loop
+                latency_ticks = [max(1, chunk_len // 2)]    # inference cost estimate, refined online
                 device = get_safe_torch_device(policy.config.device)
+
+                def sense():
+                    obs, arm_q = process_images_and_observations(img_client, camera_config, arm_ctrl)
+                    if arm_q is None or not any(
+                        k.startswith("observation.images.") and v is not None for k, v in obs.items()
+                    ):
+                        return None
+                    l_ee = r_ee = np.array([])
+                    if cfg.ee:
+                        with ee_shared_mem["lock"]:
+                            fs = np.array(ee_shared_mem["state"][:])
+                            l_ee, r_ee = fs[:ee_dof], fs[ee_dof:]
+                    obs["observation.state"] = torch.from_numpy(
+                        np.concatenate((arm_q, l_ee, r_ee), axis=0)
+                    ).float()
+                    return obs
+
+                def infer_one(obs):
+                    return predict_action(
+                        obs, policy, device, preprocessor, postprocessor,
+                        policy.config.use_amp, step["task"],
+                        use_dataset=cfg.use_dataset, robot_type=None,
+                    ).cpu().numpy()
 
                 def sense_and_infer():
                     while not stop_event.is_set():
                         with buffer_lock:
                             depth = len(action_buffer)
-                        if depth >= buffer_target:
+                        # start the next chunk when what remains roughly covers
+                        # one inference: earlier wastes horizon, later starves
+                        if depth > latency_ticks[0] + 2:
                             time.sleep(0.002)
                             continue
-                        obs, arm_q = process_images_and_observations(img_client, camera_config, arm_ctrl)
-                        if arm_q is None or not any(
-                            k.startswith("observation.images.") and v is not None for k, v in obs.items()
-                        ):
+                        obs = sense()
+                        if obs is None:
                             time.sleep(0.01)
                             continue
-                        l_ee = r_ee = np.array([])
-                        if cfg.ee:
-                            with ee_shared_mem["lock"]:
-                                fs = np.array(ee_shared_mem["state"][:])
-                                l_ee, r_ee = fs[:ee_dof], fs[ee_dof:]
-                        obs["observation.state"] = torch.from_numpy(
-                            np.concatenate((arm_q, l_ee, r_ee), axis=0)
-                        ).float()
-                        act = predict_action(
-                            obs, policy, device, preprocessor, postprocessor,
-                            policy.config.use_amp, step["task"],
-                            use_dataset=cfg.use_dataset, robot_type=None,
-                        )
+                        snap_tick = executed[0]
+                        t0 = time.perf_counter()
+                        # first call runs the actual chunk inference; the rest
+                        # drain the policy's internal queue (cheap pops), so all
+                        # chunk_len actions are conditioned on `obs` at snap_tick
+                        chunk = [infer_one(obs) for _ in range(chunk_len)]
+                        latency_ticks[0] = max(1, int((time.perf_counter() - t0) / dt) + 1)
                         with buffer_lock:
-                            action_buffer.append(act.cpu().numpy())
+                            # splice with latency compensation: chunk[i] is the
+                            # action intended for tick snap_tick+1+i, and the
+                            # first appended action will execute at tick
+                            # executed+len(buffer). Skip actions whose intended
+                            # time is already covered - THIS is what prevents
+                            # replaying trajectory segments twice.
+                            skip = (executed[0] + len(action_buffer)) - (snap_tick + 1)
+                            if skip >= len(chunk):
+                                logger_mp.warning(f"async: whole chunk stale (skip={skip}); keeping last action")
+                                skip = len(chunk) - 1
+                            action_buffer.extend(chunk[max(0, skip):])
 
                 worker = threading.Thread(target=sense_and_infer, daemon=True, name="sense_and_infer")
                 worker.start()
@@ -157,6 +185,7 @@ def eval_policy(
                         with buffer_lock:
                             if action_buffer:
                                 action_np = action_buffer.popleft()
+                                executed[0] += 1
                         if action_np is None:
                             # buffer starved (e.g. very first chunk still
                             # computing): hold pose for one tick
