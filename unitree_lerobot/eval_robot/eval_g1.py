@@ -97,6 +97,90 @@ def eval_policy(
             tau = robot_interface["arm_ik"].solve_tau(init_arm_pose)
             robot_interface["arm_ctrl"].ctrl_dual_arm(init_arm_pose, tau)
             time.sleep(1.0)  # Give time for the robot to move
+
+            # local patch: asynchronous inference. A worker thread owns
+            # sensing + policy inference and keeps a small buffer of ready
+            # actions; the main loop only executes from the buffer at the
+            # control rate. The policy's expensive chunk inference (e.g.
+            # diffusion denoising) then overlaps with execution of the
+            # previous chunk instead of freezing the robot.
+            if getattr(cfg, "async_inference", False):
+                import threading
+                from collections import deque
+
+                logger_mp.info(f"Starting ASYNC evaluation loop at {cfg.frequency} Hz.")
+                if cfg.visualization:
+                    logger_mp.warning("visualization is not supported in async mode; ignoring.")
+                action_buffer = deque()
+                buffer_lock = threading.Lock()
+                stop_event = threading.Event()
+                # keep at most one policy chunk of actions ahead: bounds
+                # observation staleness to ~n_action_steps control ticks
+                buffer_target = int(getattr(policy.config, "n_action_steps", 8))
+                device = get_safe_torch_device(policy.config.device)
+
+                def sense_and_infer():
+                    while not stop_event.is_set():
+                        with buffer_lock:
+                            depth = len(action_buffer)
+                        if depth >= buffer_target:
+                            time.sleep(0.002)
+                            continue
+                        obs, arm_q = process_images_and_observations(img_client, camera_config, arm_ctrl)
+                        if arm_q is None or not any(
+                            k.startswith("observation.images.") and v is not None for k, v in obs.items()
+                        ):
+                            time.sleep(0.01)
+                            continue
+                        l_ee = r_ee = np.array([])
+                        if cfg.ee:
+                            with ee_shared_mem["lock"]:
+                                fs = np.array(ee_shared_mem["state"][:])
+                                l_ee, r_ee = fs[:ee_dof], fs[ee_dof:]
+                        obs["observation.state"] = torch.from_numpy(
+                            np.concatenate((arm_q, l_ee, r_ee), axis=0)
+                        ).float()
+                        act = predict_action(
+                            obs, policy, device, preprocessor, postprocessor,
+                            policy.config.use_amp, step["task"],
+                            use_dataset=cfg.use_dataset, robot_type=None,
+                        )
+                        with buffer_lock:
+                            action_buffer.append(act.cpu().numpy())
+
+                worker = threading.Thread(target=sense_and_infer, daemon=True, name="sense_and_infer")
+                worker.start()
+                try:
+                    while True:
+                        loop_start_time = time.perf_counter()
+                        action_np = None
+                        with buffer_lock:
+                            if action_buffer:
+                                action_np = action_buffer.popleft()
+                        if action_np is None:
+                            # buffer starved (e.g. very first chunk still
+                            # computing): hold pose for one tick
+                            time.sleep(1.0 / cfg.frequency)
+                            continue
+                        arm_action = action_np[:arm_dof]
+                        tau = arm_ik.solve_tau(arm_action)
+                        arm_ctrl.ctrl_dual_arm(arm_action, tau)
+                        if cfg.ee:
+                            ee_start = arm_dof
+                            l_act = action_np[ee_start : ee_start + ee_dof]
+                            r_act = action_np[ee_start + ee_dof : ee_start + 2 * ee_dof]
+                            if isinstance(ee_shared_mem["left"], SynchronizedArray):
+                                ee_shared_mem["left"][:] = to_list(l_act)
+                                ee_shared_mem["right"][:] = to_list(r_act)
+                            elif hasattr(ee_shared_mem["left"], "value") and hasattr(ee_shared_mem["right"], "value"):
+                                ee_shared_mem["left"].value = to_scalar(l_act)
+                                ee_shared_mem["right"].value = to_scalar(r_act)
+                        idx += 1
+                        time.sleep(max(0, (1.0 / cfg.frequency) - (time.perf_counter() - loop_start_time)))
+                finally:
+                    stop_event.set()
+                    worker.join(timeout=2.0)
+
             # --- Run Main Loop ---
             logger_mp.info(f"Starting evaluation loop at {cfg.frequency} Hz.")
             while True:

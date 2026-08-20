@@ -130,6 +130,10 @@ class EvalRealConfig:
     image_host: str = "192.168.123.164"
 
     # Mode flags
+    # local patch: overlap policy inference with action execution (worker
+    # thread senses+infers into a buffer; main loop executes at fixed rate).
+    # Hides diffusion-style inference pauses. eval_g1.py only.
+    async_inference: bool = False
     motion: bool = False
     headless: bool = False
     visualization: bool = False
